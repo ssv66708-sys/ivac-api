@@ -6,12 +6,10 @@ import dddocr
 import re
 import urllib3
 
-# SSL সতর্কবার্তা নিষ্ক্রিয় করার জন্য
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-app = FastAPI(title="IVAC 100% Dynamic Visa Tracker API")
+app = FastAPI(title="IVAC Auto-Detect Visa Tracker API")
 
-# যেকোনো ডোমেইন/মোবাইল অ্যাপ থেকে কল করার জন্য CORS ওপেন
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,123 +18,173 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# সার্ভার স্টার্ট হওয়ার সময় OCR মডেল লোড হবে (একবারই)
-print("🚀 লাইভ ক্যাপচা মডেল লোড হচ্ছে...")
+print("🚀 OCR মডেল লোড হচ্ছে...")
 ocr = dddocr.DdddOcr(show_ad=False)
-print("✅ OCR মডেল প্রস্তুত! এখন যেকোনো নম্বরের জন্য রিয়েল-টাইম কাজ করবে।")
+print("✅ OCR রেডি!")
 
 
 @app.get("/")
 def home():
-    return {
-        "status": "online",
-        "message": "IVAC Live 100% Dynamic API is Running!"
-    }
+    return {"status": "online", "message": "IVAC Live Tracker API Running"}
 
 
 @app.get("/track")
-def track_visa(bgd: str = Query(..., description="ব্যবহারকারীর দেওয়া BGD নম্বর")):
+def track_visa(bgd: str = Query(..., description="BGD Number")):
     bgd = bgd.strip().upper()
-    print(f"\n🔍 [LIVE REQUEST] BGD ট্র্যাক করা হচ্ছে: {bgd}")
+    print(f"\n==========================================")
+    print(f"🔍 [LIVE CHECK] রিকোয়েস্ট এসেছে BGD: {bgd}")
 
-    # নম্বর সঠিক কি না প্রাথমিক যাচাই
     if not bgd or len(bgd) < 6:
-        return {
-            "success": False,
-            "message": "অনুগ্রহ করে একটি সঠিক Web File (BGD) নম্বর লিখুন।"
-        }
+        return {"success": False, "message": "সঠিক Web File (BGD) নম্বর প্রদান করুন।"}
 
-    passtrack_url = "https://www.passtrack.net/regular_passport.php"
+    url = "https://www.passtrack.net/regular_passport.php"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Referer": "https://www.passtrack.net/regular_passport.php",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,bn;q=0.8"
     }
 
-    # ক্যাপচা কখনো ১ বারে ভুল রিড হলে অটোমেটিক ৩ বার পর্যন্ত রিট্রাই করবে
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        print(f"📡 লাইভ সার্ভারে চেষ্টা চলছে ({attempt}/{max_retries})...")
+    last_server_response = ""
+
+    # ৩ বার রিট্রাই করবে
+    for attempt in range(1, 4):
+        print(f"📡 চেষ্টা চলছে: {attempt}/3...")
         session = requests.Session()
         session.headers.update(headers)
 
         try:
-            # ১. পাসট্র্যাকের পেজ লোড
-            res_page = session.get(passtrack_url, timeout=15, verify=False)
+            # ১. মূল পেজ লোড
+            res_page = session.get(url, timeout=15, verify=False)
             soup = BeautifulSoup(res_page.text, "html.parser")
 
-            # ২. ক্যাপচা ছবি বের করা
-            captcha_img = soup.find("img", {"src": re.compile(r"captcha|verification", re.I)})
-            captcha_code = ""
+            form = soup.find("form")
+            if not form:
+                print("❌ পেজে কোনো ফর্ম পাওয়া যায়নি!")
+                continue
 
+            # ২. ফর্মের আসল অ্যাকশন URL নির্ধারণ
+            action = form.get("action", "")
+            if not action:
+                post_url = url
+            elif action.startswith("http"):
+                post_url = action
+            else:
+                post_url = "https://www.passtrack.net/" + action.lstrip("/")
+
+            # ৩. ক্যাপচা ইমেজ ও টেক্সট সমাধান
+            captcha_img = form.find("img", {"src": re.compile(r"captcha|verification|image", re.I)})
+            if not captcha_img:
+                captcha_img = soup.find("img", {"src": re.compile(r"captcha|verification|image", re.I)})
+
+            captcha_text = ""
             if captcha_img and captcha_img.get("src"):
                 img_url = captcha_img["src"]
                 if not img_url.startswith("http"):
                     img_url = "https://www.passtrack.net/" + img_url.lstrip("/")
 
-                # ক্যাপচা ছবি নামিয়ে dddocr দিয়ে কোড পড়া
-                img_bytes = session.get(img_url, timeout=10, verify=False).content
-                captcha_code = ocr.classification(img_bytes).strip().upper()
-                print(f"🤖 স্বয়ংক্রিয় ক্যাপচা সমাধান: {captcha_code}")
+                img_data = session.get(img_url, timeout=10, verify=False).content
+                captcha_text = ocr.classification(img_data).strip().upper()
+                print(f"🤖 সমাধানকৃত ক্যাপচা: {captcha_text}")
 
-            # ৩. লাইভ সার্ভারে সাবমিট করা
-            payload = {
-                "webfile_no": bgd,
-                "code": captcha_code,
-                "submit": "Submit"
-            }
+            # ৪. স্বয়ংক্রিয়ভাবে ফর্মের আসল ইনপুট নাম খুঁজে পেলোড তৈরি
+            payload = {}
+            for inp in form.find_all("input"):
+                name = inp.get("name")
+                if not name:
+                    continue
+                inp_type = inp.get("type", "text").lower()
+                val = inp.get("value", "")
 
-            post_res = session.post(passtrack_url, data=payload, timeout=20, verify=False)
-            html_text = post_res.text
-            html_upper = html_text.upper()
+                if inp_type == "hidden":
+                    payload[name] = val
+                elif inp_type == "submit":
+                    payload[name] = val or "Submit"
 
-            # ক্যাপচা মিসম্যাচ হলে পরের চেষ্টায় যাবে
-            if "INVALID CODE" in html_upper or "WRONG CODE" in html_upper:
-                print("⚠️ ক্যাপচা রিড মেলেনি, পুনরায় চেষ্টা করা হচ্ছে...")
+            # ফর্মের টেক্সট ইনপুটগুলো শনাক্ত করা
+            text_inputs = form.find_all("input", {"type": lambda t: t in [None, "text"]})
+            
+            if len(text_inputs) >= 2:
+                # সাধারণত প্রথমটি ক্যাপচা এবং দ্বিতীয়টি ওয়েব ফাইল, অথবা নাম দিয়ে শনাক্ত
+                assigned_bgd = False
+                assigned_cap = False
+                for inp in text_inputs:
+                    n = inp.get("name", "").lower()
+                    if any(k in n for k in ["code", "cap", "val", "ver"]):
+                        payload[inp["name"]] = captcha_text
+                        assigned_cap = True
+                    elif any(k in n for k in ["web", "file", "reg", "bgd", "no"]):
+                        payload[inp["name"]] = bgd
+                        assigned_bgd = True
+
+                # যদি নাম দিয়ে না মিলে পজিশন অনুযায়ী ফিল করা
+                if not assigned_cap and len(text_inputs) > 0:
+                    payload[text_inputs[0]["name"]] = captcha_text
+                if not assigned_bgd and len(text_inputs) > 1:
+                    payload[text_inputs[1]["name"]] = bgd
+            else:
+                # ডিফল্ট ব্যাকআপ পেলোড
+                payload["webfile_no"] = bgd
+                payload["code"] = captcha_text
+                payload["submit"] = "Submit"
+
+            print(f"📤 সাবমিট ডাটা: {payload}")
+
+            # ৫. সাবমিট করা
+            post_res = session.post(post_url, data=payload, timeout=20, verify=False)
+            res_html = post_res.text
+            res_upper = res_html.upper()
+
+            # ক্যাপচা ভুল হলে আবার চেষ্টা
+            if "INVALID CODE" in res_upper or "WRONG CODE" in res_upper or "INCORRECT" in res_upper:
+                print("⚠️ ক্যাপচা ভুল হয়েছে, রিট্রাই হচ্ছে...")
                 continue
 
-            # ৪. কোনো রেকর্ড না পাওয়া গেলে
-            if "NOT FOUND" in html_upper or "NO RECORD" in html_upper or not html_text.strip():
-                print(f"❌ কোনো রেকর্ড পাওয়া যায়নি: {bgd}")
-                return {
-                    "success": False,
-                    "message": "এই BGD নম্বরে কোনো তথ্য পাওয়া যায়নি! নম্বরটি ঠিক আছে কি না পুনরায় যাচাই করুন।"
-                }
+            # পেজের মূল টেক্সট এক্সট্রাক্ট করা (ডিবাগিংয়ের জন্য)
+            clean_soup = BeautifulSoup(res_html, "html.parser")
+            body_text = clean_soup.get_text(separator=" ", strip=True)
+            last_server_response = body_text[:150]
 
-            # ৫. রেসপন্স থেকে লাইভ তথ্য পার্সিং
-            result_soup = BeautifulSoup(html_text, "html.parser")
+            # ৬. ফলাফল পাওয়া গেছে কি না যাচাই
+            # passtrack-এ সফল হলে Step-1, Done, অথবা Delivered ইত্যাদি থাকে
+            has_step = any(k in res_upper for k in ["STEP-1", "STEP-2", "STEP-3", "STEP-4", "DONE"])
+            has_status = any(k in res_upper for k in ["RECEIVED", "INITIATED", "DELIVERY", "DELIVERED", "UNDER PROCESS"])
 
-            # নাম ও সেন্টারের ফিল্ড খোঁজা
-            applicant_name = "আবেদনকারী"
-            center_name = "IVAC Center"
+            if not has_step and not has_status:
+                if "NOT FOUND" in res_upper or "NO RECORD" in res_upper:
+                    print("❌ সার্ভারে কোনো রেকর্ড নেই।")
+                    return {
+                        "success": False,
+                        "message": f"passtrack.net-এ {bgd} নম্বরের কোনো রেকর্ড নেই। পাসপোর্ট ডেলিভারি হয়ে গেলে অথবা নতুন ফাইল হলে IVAC-এর সেন্ট্রাল পোর্টালে তথ্য আপডেট হতে কিছুটা সময় লাগতে পারে।"
+                    }
 
-            # টেবিল থেকে ডেটা পার্স করার চেষ্টা
-            for tr in result_soup.find_all("tr"):
-                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                if len(cells) >= 2:
-                    joined = " ".join(cells).upper()
-                    if "NAME" in joined and len(cells) >= 2:
-                        applicant_name = cells[1]
-                    elif "CENTER" in joined and len(cells) >= 2:
-                        center_name = cells[1]
-
-            # ৬. লাইভ স্ট্যাটাস এবং স্টেপ নির্ধারণ
+            # ৭. স্ট্যাটাস ও স্টেপ নির্ধারণ
             status = "Received At Center"
             step = 1
 
-            if "DELIVERED" in html_upper:
+            if "DELIVERED" in res_upper and ("STEP-4" in res_upper or "DONE" in res_upper):
                 status = "Delivered From Center"
                 step = 4
-            elif "READY FOR DELIVERY" in html_upper:
+            elif "READY FOR DELIVERY" in res_upper or ("STEP-3" in res_upper and "DONE" in res_upper):
                 status = "Ready For Delivery"
                 step = 3
-            elif "PROCESS INITIATED" in html_upper or "UNDER PROCESS" in html_upper or "HIGH COMMISSION" in html_upper:
+            elif "PROCESS INITIATED" in res_upper or "UNDER PROCESS" in res_upper or ("STEP-2" in res_upper and "DONE" in res_upper):
                 status = "Process Initiated"
                 step = 2
 
-            print(f"🎉 [লাইভ ডেটা পাওয়া গেছে] Status: {status} | Step: {step}")
+            # নাম ও সেন্টারের তথ্য বের করা
+            applicant_name = "আবেদনকারী"
+            center_name = "IVAC Center"
+            for tr in clean_soup.find_all("tr"):
+                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if len(cells) >= 2:
+                    row_txt = " ".join(cells).upper()
+                    if "NAME" in row_txt and len(cells) >= 2:
+                        applicant_name = cells[1]
+                    elif "CENTER" in row_txt and len(cells) >= 2:
+                        center_name = cells[1]
 
-            # সম্পূর্ণ ডাইনামিক লাইভ রেসপন্স
+            print(f"🎉 ডেটা সফলভাবে পার্স হয়েছে! Status: {status}, Step: {step}")
             return {
                 "success": True,
                 "bgd": bgd,
@@ -144,17 +192,17 @@ def track_visa(bgd: str = Query(..., description="ব্যবহারকার
                 "status": status,
                 "step": step,
                 "center": center_name,
-                "message": "সফলভাবে লাইভ তথ্য পাওয়া গেছে।"
+                "message": "সফলভাবে রেকর্ড পাওয়া গেছে"
             }
 
         except Exception as e:
-            print(f"⚠️ চেষ্টার সময় ত্রুটি: {e}")
+            print(f"⚠️ চেষ্টা চলাকালীন ত্রুটি: {e}")
             continue
 
-    # সব চেষ্টা ব্যর্থ হলে
+    # ৩ বার চেষ্টার পরও না হলে
     return {
         "success": False,
-        "message": "ভিসা সার্ভারটি এই মুহূর্তে ধীরগতির অথবা ক্যাপচা পড়তে সমস্যা হচ্ছে। অনুগ্রহ করে ২ মিনিট পর আবার চেষ্টা করুন।"
+        "message": f"সার্ভার থেকে সঠিক রেসপন্স আসেনি। সার্ভারের রেসপন্স সারাংশ: '{last_server_response[:80]}...' অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।"
     }
 
 
